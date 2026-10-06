@@ -57,4 +57,5 @@ npm start            # serves the API and the frontend on $PORT
 
 ## Config (optional)
 - Backend: `PORT` (default `5000`) and `CLIENT_ORIGIN` (default `http://localhost:5173`, used for CORS)
+- Backend: `FINNHUB_API_KEY`, a free key from [finnhub.io](https://finnhub.io/register). Yahoo often blocks its quote and fundamentals endpoints from cloud servers. When that happens, the API rebuilds quotes from chart data and pulls P/E, EPS, market cap and beta from Finnhub if this key is set.
 - Frontend: `VITE_API_URL`, for when the API is hosted somewhere else in production

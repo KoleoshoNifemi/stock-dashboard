@@ -1,5 +1,6 @@
 import YahooFinance from "yahoo-finance2";
 import { cached } from "../lib/cache.js";
+import { getFundamentals } from "./finnhub.js";
 
 const yf = new YahooFinance({ suppressNotices: ["yahooSurvey"] });
 
@@ -38,13 +39,82 @@ function toQuote(q) {
   };
 }
 
+// Yahoo's quote/quoteSummary endpoints need a "crumb" token, which Yahoo often refuses to
+// cloud servers (HTTP 429). The chart and search endpoints don't need one, so when the crumb
+// is blocked we rebuild the data from those instead, and skip crumb calls for a while.
+let crumbBlockedUntil = process.env.YAHOO_NO_CRUMB ? Infinity : 0;
+
+async function withCrumbFallback(primary, fallback) {
+  if (Date.now() < crumbBlockedUntil) return fallback();
+  try {
+    return await primary();
+  } catch (err) {
+    if (!/crumb|429|too many requests|unauthorized/i.test(err.message ?? "")) throw err;
+    console.warn(`Yahoo crumb unavailable (${err.message}); using chart-based fallback for 30 min`);
+    crumbBlockedUntil = Date.now() + 30 * MINUTE;
+    return fallback();
+  }
+}
+
+function marketStateFrom(meta) {
+  const period = meta.currentTradingPeriod;
+  if (!period) return null;
+  const now = Date.now();
+  const inside = (p) => p && now >= new Date(p.start).getTime() && now < new Date(p.end).getTime();
+  if (inside(period.regular)) return "REGULAR";
+  if (inside(period.pre)) return "PRE";
+  if (inside(period.post)) return "POST";
+  return "CLOSED";
+}
+
+// A quote rebuilt from the last few daily candles plus the chart metadata.
+async function quoteFromChart(symbol) {
+  const { meta, quotes } = await yf.chart(symbol, { period1: new Date(Date.now() - 10 * DAY), interval: "1d" });
+  const bars = quotes.filter((b) => b.close != null);
+  const today = bars.at(-1);
+  const previousClose = bars.at(-2)?.close ?? meta.chartPreviousClose ?? null;
+  const price = meta.regularMarketPrice ?? today?.close ?? null;
+  const change = price != null && previousClose != null ? price - previousClose : null;
+
+  return {
+    symbol: meta.symbol ?? symbol,
+    name: meta.longName ?? meta.shortName ?? symbol,
+    price,
+    change,
+    changePercent: change != null && previousClose ? (change / previousClose) * 100 : null,
+    previousClose,
+    open: today?.open ?? null,
+    dayHigh: meta.regularMarketDayHigh ?? today?.high ?? null,
+    dayLow: meta.regularMarketDayLow ?? today?.low ?? null,
+    volume: meta.regularMarketVolume ?? today?.volume ?? null,
+    marketCap: null,
+    currency: meta.currency ?? "USD",
+    exchange: meta.fullExchangeName ?? meta.exchangeName ?? null,
+    marketState: marketStateFrom(meta),
+    fiftyTwoWeekHigh: meta.fiftyTwoWeekHigh ?? null,
+    fiftyTwoWeekLow: meta.fiftyTwoWeekLow ?? null,
+  };
+}
+
+async function quotesFromCharts(symbols) {
+  const results = await Promise.allSettled(symbols.map(quoteFromChart));
+  const quotes = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
+  if (!quotes.length && results.length) throw results[0].reason;
+  return quotes;
+}
+
 export async function getQuotes(symbols) {
   const key = `quotes:${[...symbols].sort().join(",")}`;
-  return cached(key, 15 * SECOND, async () => {
-    const results = await yf.quote(symbols);
-    const list = Array.isArray(results) ? results : [results];
-    return list.filter(Boolean).map(toQuote);
-  });
+  return cached(key, 15 * SECOND, () =>
+    withCrumbFallback(
+      async () => {
+        const results = await yf.quote(symbols);
+        const list = Array.isArray(results) ? results : [results];
+        return list.filter(Boolean).map(toQuote);
+      },
+      () => quotesFromCharts(symbols),
+    ),
+  );
 }
 
 export async function getHistory(symbol, range) {
@@ -78,36 +148,80 @@ export async function getHistory(symbol, range) {
   });
 }
 
-export async function getSummary(symbol) {
-  return cached(`summary:${symbol}`, 10 * MINUTE, async () => {
-    const s = await yf.quoteSummary(symbol, {
-      modules: ["summaryProfile", "summaryDetail", "defaultKeyStatistics", "price"],
-    });
-    const d = s.summaryDetail ?? {};
-    const k = s.defaultKeyStatistics ?? {};
-    const p = s.summaryProfile ?? {};
-
-    return {
-      symbol,
-      name: s.price?.longName ?? s.price?.shortName ?? symbol,
-      sector: p.sector ?? null,
-      industry: p.industry ?? null,
-      website: p.website ?? null,
-      employees: p.fullTimeEmployees ?? null,
-      description: p.longBusinessSummary ?? null,
-      stats: {
-        marketCap: d.marketCap ?? null,
-        peRatio: d.trailingPE ?? null,
-        forwardPE: d.forwardPE ?? null,
-        eps: k.trailingEps ?? null,
-        beta: d.beta ?? null,
-        dividendYield: d.dividendYield ?? null,
-        fiftyTwoWeekHigh: d.fiftyTwoWeekHigh ?? null,
-        fiftyTwoWeekLow: d.fiftyTwoWeekLow ?? null,
-        averageVolume: d.averageVolume ?? null,
-      },
-    };
+async function summaryFromQuoteSummary(symbol) {
+  const s = await yf.quoteSummary(symbol, {
+    modules: ["summaryProfile", "summaryDetail", "defaultKeyStatistics", "price"],
   });
+  const d = s.summaryDetail ?? {};
+  const k = s.defaultKeyStatistics ?? {};
+  const p = s.summaryProfile ?? {};
+
+  return {
+    symbol,
+    name: s.price?.longName ?? s.price?.shortName ?? symbol,
+    sector: p.sector ?? null,
+    industry: p.industry ?? null,
+    website: p.website ?? null,
+    employees: p.fullTimeEmployees ?? null,
+    description: p.longBusinessSummary ?? null,
+    stats: {
+      marketCap: d.marketCap ?? null,
+      peRatio: d.trailingPE ?? null,
+      forwardPE: d.forwardPE ?? null,
+      eps: k.trailingEps ?? null,
+      beta: d.beta ?? null,
+      dividendYield: d.dividendYield ?? null,
+      fiftyTwoWeekHigh: d.fiftyTwoWeekHigh ?? null,
+      fiftyTwoWeekLow: d.fiftyTwoWeekLow ?? null,
+      averageVolume: d.averageVolume ?? null,
+    },
+  };
+}
+
+// Crumb-free summary: chart metadata + search (for sector/industry) + Finnhub fundamentals if configured.
+async function summaryFromFallbacks(symbol) {
+  const [quote, history, searchRes, fundamentals] = await Promise.all([
+    quoteFromChart(symbol),
+    yf.chart(symbol, { period1: new Date(Date.now() - 91 * DAY), interval: "1d" }).catch(() => null),
+    yf.search(symbol, { quotesCount: 5, newsCount: 0 }).catch(() => null),
+    getFundamentals(symbol).catch((err) => {
+      console.warn(`Finnhub lookup failed for ${symbol}: ${err.message}`);
+      return null;
+    }),
+  ]);
+  const match = searchRes?.quotes?.find((q) => q.symbol === symbol);
+  const volumes = (history?.quotes ?? []).map((b) => b.volume).filter((v) => v > 0);
+  const averageVolume = volumes.length ? Math.round(volumes.reduce((a, b) => a + b, 0) / volumes.length) : null;
+
+  return {
+    symbol,
+    name: quote.name,
+    sector: match?.sectorDisp ?? match?.sector ?? null,
+    industry: match?.industryDisp ?? match?.industry ?? fundamentals?.industry ?? null,
+    website: fundamentals?.website ?? null,
+    employees: null,
+    description: null,
+    stats: {
+      marketCap: fundamentals?.marketCap ?? null,
+      peRatio: fundamentals?.peRatio ?? null,
+      forwardPE: null,
+      eps: fundamentals?.eps ?? null,
+      beta: fundamentals?.beta ?? null,
+      dividendYield: fundamentals?.dividendYield ?? null,
+      fiftyTwoWeekHigh: quote.fiftyTwoWeekHigh,
+      fiftyTwoWeekLow: quote.fiftyTwoWeekLow,
+      averageVolume: fundamentals?.averageVolume ?? averageVolume,
+    },
+  };
+}
+
+export async function getSummary(symbol) {
+  return cached(`summary:${symbol}`, 10 * MINUTE, () =>
+    withCrumbFallback(
+      () => summaryFromQuoteSummary(symbol),
+      () => summaryFromFallbacks(symbol),
+    ),
+  );
 }
 
 export async function search(query) {

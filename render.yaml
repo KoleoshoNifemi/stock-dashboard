@@ -10,3 +10,6 @@ services:
     envVars:
       - key: NODE_VERSION
         value: "22"
+      # Optional free key from https://finnhub.io for P/E, EPS, beta, etc. on cloud hosts.
+      - key: FINNHUB_API_KEY
+        sync: false
