@@ -2,6 +2,8 @@
 
 A full-stack stock dashboard. The frontend is React + TypeScript (Vite) and the backend is Node + Express.
 
+**Live demo:** https://stock-dashboard-ti5f.onrender.com. It's on Render's free tier, so the first load can take about 50 seconds while the server wakes up.
+
 **No API keys needed.** Market data comes from Yahoo Finance through the [`yahoo-finance2`](https://github.com/gadicc/yahoo-finance2) package.
 
 ## Features
