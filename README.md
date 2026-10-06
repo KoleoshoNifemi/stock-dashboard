@@ -44,6 +44,17 @@ frontend/                React + TS (Vite proxies /api -> :5000)
 | GET | `/api/stocks/:symbol/news` | Recent news |
 | GET/POST/DELETE | `/api/watchlist[/:symbol]` | Read, add to, or remove from the watchlist |
 
+## Deploy
+In production, the Express server also serves the built React app, so the whole project runs as one service.
+
+**Render (free):** In the Render dashboard, choose **New → Blueprint**, then select this repo. `render.yaml` takes care of the rest.
+
+**Any other Node host:**
+```bash
+npm run build:prod   # install deps and build the frontend
+npm start            # serves the API and the frontend on $PORT
+```
+
 ## Config (optional)
 - Backend: `PORT` (default `5000`) and `CLIENT_ORIGIN` (default `http://localhost:5173`, used for CORS)
 - Frontend: `VITE_API_URL`, for when the API is hosted somewhere else in production

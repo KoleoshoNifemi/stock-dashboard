@@ -1,5 +1,8 @@
 import express from "express";
 import cors from "cors";
+import path from "node:path";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import stocksRouter from "./routes/stocks.js";
 import watchlistRouter from "./routes/watchlist.js";
 
@@ -14,6 +17,14 @@ app.use(express.json());
 app.get("/api/health", (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 app.use("/api/watchlist", watchlistRouter);
 app.use("/api", stocksRouter);
+app.use("/api", (_req, res) => res.status(404).json({ error: "Not found" }));
+
+// In production the backend also serves the built React app (frontend/dist).
+const CLIENT_DIST = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../frontend/dist");
+if (existsSync(CLIENT_DIST)) {
+  app.use(express.static(CLIENT_DIST));
+  app.get(/.*/, (_req, res) => res.sendFile(path.join(CLIENT_DIST, "index.html")));
+}
 
 app.use((_req, res) => res.status(404).json({ error: "Not found" }));
 
